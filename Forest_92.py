@@ -2,13 +2,9 @@ from sklearn.ensemble._forest import ForestClassifier
 from diffprivlib.accountant import BudgetAccountant
 import numpy as np
 import random
+from Node_4 import Node
 from collections import Counter, defaultdict
-import numpy as np 
-from Node import Node
-import random
-from collections import Counter, defaultdict
-
-
+from sklearn.metrics import mean_squared_error
 
 
 class DPRF_Forest(ForestClassifier):
@@ -119,10 +115,12 @@ class DPRF_Forest(ForestClassifier):
                             root, # random root attribute for SNR
                             class_values, 
                             self.feature_discrete, 
-                            'Median',  # treetype
+                            'Median', # 'Median', Random' # treetype
                             dataset_size, 
                             epsilon, # epsilon per tree
-                            max_depth) 
+                            max_depth, 
+                            training_data[:len(tr_data)//2],
+                            tr_data[len(tr_data)//2:]) 
 
             # each tree needs to be trained on a different subsample of the training data! 
             print("currently training! ")
@@ -149,16 +147,6 @@ class DPRF_Forest(ForestClassifier):
             attr_domains[str(i)] = [str(x) for x in set(transData[i])]
         return attr_domains
 
-    #def selective_aggregation(trees):
-
-    #    error_rates = []
-
-    #    for i in range(1, len(trees)):
-    #        for j in range(1, len(trees) + 1 - i):
-    #            STM1 =  
-
-
-    #    return trees
 
 
     # GET MAJORITY LABELS (Forest, T, C) equivalent from pseudocode
@@ -184,13 +172,11 @@ class DPRF_Forest(ForestClassifier):
                 # GET PREDICTED CLASSIFICATION RESULT for a single record
                 # node, leaf_not_used = tree._classify(tree._root_node, rec)
 
-                # print(np.array([rec])) (4 trees)
-
                 #[['58' '15' '0' '1' '0']] * the amount of trees... (now indcludes true label?)
 
                 # print(np.array([rec]))
                 
-                result = tree.pred(np.array([rec]))
+                result = tree.pred(np.array([rec])) # returns the class
 
                 print("result: ", result)
 
@@ -217,14 +203,12 @@ class DPRF_Forest(ForestClassifier):
 
 
 
-
-
 class Tree_DPDT():
 
     '''
     The main class of decision tree.
     '''
-    def __init__(self, A_ind, A, attribute_values, root, class_values, feature_discrete, treetype, dataset_size, epsilon_per_tree, max_depth):
+    def __init__(self, A_ind, A, attribute_values, root, class_values, feature_discrete, treetype, dataset_size, epsilon_per_tree, max_depth, training_data, test_data):
         '''
         attribute_values : attribute_values
         A : orignal
@@ -248,6 +232,8 @@ class Tree_DPDT():
         self.dataset_size=dataset_size
         self.epsilon = epsilon_per_tree # B
         self.dm = max_depth
+        self.training_data = training_data
+        self.test_data = test_data
         self.w = None
         self.num_classes = len(class_values)
 
@@ -311,6 +297,98 @@ class Tree_DPDT():
         # Choose an element from options based on the probabilities
         return np.random.choice(options, 1, p=probabilities.astype('float'))[0]
 
+    def exponential_method_last(self, options, sensitivity, epsilon, scores, B, N):
+
+        sc_values = list(scores.values())
+        sc_values2 = np.array([  sc_values  ], dtype=np.float128)
+
+        # Calculate the probability for each element, based on its score
+        probabilities = [np.exp(- ( (epsilon * N) / (8*B**2) ) * score / (2 * sensitivity)) for score in sc_values2[0]]
+
+        # Normalize the probabilties so they sum to 1
+        probabilities = probabilities / np.linalg.norm(probabilities, ord=1)
+
+        print("prob and options lenghts new: ", len(probabilities), "  ",  len(options))
+
+        return np.random.choice(options, 1, p=probabilities.astype('float'))[0]
+
+    def MSE_calculator(self, D, A, vals, attr):  # attr: 'Age'
+
+        ### create temporary version of tree,  where we would've split with the value and column in vals
+
+        # save OG tree
+        saved_tree = self.tree
+        print("saved tree and self.tree: ", saved_tree, self.tree)
+
+        training_data = self.training_data
+        test_data = self.test_data
+
+        split_val = vals[attr] # 37.5
+        # true_vals = test_data[:, -1]
+
+        class_index = len(training_data[0]) - 1
+        actual_labels = [x[class_index] for x in test_data]
+        hh_actual_labels = [int(*el) for el in actual_labels]
+    
+        #print("A in MSE: ")
+        #print(A) # 'MaritalStatus': [3, array(['0', '1', '2', '3', '4', '5', '6']
+
+        #print(f"unique in splitting attribute {attr} training data", np.unique(training_data[:, A[attr][0]]))
+        #print(f"unique in splitting attribute {attr} in D", np.unique(D[:, A[attr][0]]))
+        #print("____________")
+
+        # temporary A that corresponds to the data in D 
+        #A_copy = A.copy()
+        #if self.feature_discrete[attr] is True:
+        #    A_copy[attr] = [ A[attr][0], np.unique(D[:, A[attr][0]]) ]
+
+        #print("new A copy in MSE")
+        #print(A_copy)
+
+        #print("build temp tree...")
+        self.tree = self.temp_tree(training_data, A, attr, split_val) # returns a node
+
+        #print("building temp tree worked! ", self.tree, self.tree.map)
+
+        #print("training temp tree...")
+        X = training_data[:, 0:training_data.shape[1]-1] # datarows
+        X = np.array(X)
+
+        y = training_data[:, -1] # targets
+        y = [[el] for el in y]
+        y = np.array(y)
+        
+        #print("MSE calc node loop")
+        for i in range(len(X)):
+            node = self.tree.classify(X[i], A )
+            node.increment_class_count(y[i].item())
+            #print(i, node, node._class_counts)
+
+        self.tree.set_noisy_label(self.epsilon, self.class_values)
+
+        #print("tree trained!")
+
+        h = []
+
+        for rec in test_data:
+        # result = self.tree.pred(np.array([rec]))  # AttributeError: 'Node' object has no attribute 'pred'
+            result = self.predict_temp( np.array([rec]), A, self.tree ) # array([['N']], dtype='<U1')
+            h.append(result)
+
+        print("new h, predictions succesful! ")
+
+        #print(h)
+    
+        hh = [int(*el) for el in h]
+
+        sc = mean_squared_error(hh, hh_actual_labels)
+
+        print(f"sc for {attr} was: ",sc)
+
+        self.tree = saved_tree
+
+        return sc
+
     def randomOrder(self, D, A):
 
         '''
@@ -328,8 +406,7 @@ class Tree_DPDT():
             possibleVal = np.unique(D[:, info[0]])  #info[0] is the index to the array column where possible values of attribute are in D
             # this should not affect sensitivity...
 
-            # if the continuous attribute have only one possible value, then 
-            # choosing it won't improve the model, so we abandon it.
+            # if the continuous attribute have only one possible value, then choosing it won't improve the model, so we abandon it.
             if len(possibleVal)==1:
                 continue
 
@@ -399,15 +476,6 @@ class Tree_DPDT():
 
     def medianSplitOrder(self, D, A, epsilon):
 
-        # D 
-        #[['x' 'f' 'g' ... 'v' 'd' '1']
-        #['b' 'y' 'w' ... 'n' 'g' '1']
-        #['f' 's' 'y' ... 'v' 'd' '1']
-        #...
-
-        print("IN A")
-        print(A)
-
         tmp_value_dict=dict()
 
         for attr, info in A.items():
@@ -430,9 +498,7 @@ class Tree_DPDT():
 
                 Attr_ind = A[attr][0]
                 
-
-                # A:  {'Gender': [3, array(['0', '1'], dtype='<U21')], 'Age': [0, 25.5], 
-                # 'Education': [1, array(['0', '1', '10', '11', '12', '14', '15', '2', '4', '5', '6', '7',
+                # A:  {'Gender': [3, array(['0', '1'], dtype='<U21')], 'Age': [0, 25.5],  'Education': [1, array(['0', '1', '10', '11', '12', '14', '15', '2', '4', '5', '6', '7',
                 # '8', '9'], dtype='<U21')]}
 
                 # CALCULATE BEST SPLIT FOR EACH CATEGORICAL VARIABLE
@@ -465,11 +531,11 @@ class Tree_DPDT():
 
                 # q(r) = ||X_{i,a} ∩ [a_L, r)|−|X_{i,a} ∩ [r, a_U ]||,
 
-                print('continuous attr: ', attr)
-                print('attr info: ', info)
-                print("age minmax: ", al, au)
-                print('Age split_points: ')
-                print(split_points)
+                #print('continuous attr: ', attr)
+                #print('attr info: ', info)
+                #print("age minmax: ", al, au)
+                #print('Age split_points: ')
+                #print(split_points)
 
                 ######
                 an = {}
@@ -527,18 +593,9 @@ class Tree_DPDT():
 
                 tmp_value_dict[attr] = cv
   
-
-        print("tmp_value_dict after cont and cat attrs have been processed")
         print(tmp_value_dict) 
-        # {'Age': 37.5, 
-        # 'Workclass': '0', 
-        # 'Education': '13', 
-        # 'MaritalStatus': '1', 
-        # 'Occupation': '1', 
-        # 'Relationship': '2', 
-        # 'Race': '3', 
-        # 'HoursPerWeek': 40.5, 
-        # 'Gender': '0'}
+        # {'Age': 37.5, 'Workclass': '0',  'Education': '13',  'MaritalStatus': '1', 'Occupation': '1', 
+        # 'Relationship': '2', 'Race': '3', 'HoursPerWeek': 40.5,  'Gender': '0'}
 
         # here all the possible attributes are listed ('gender', 'age', 'education' ... )
         attr_list = list(tmp_value_dict.keys())  
@@ -546,14 +603,27 @@ class Tree_DPDT():
         ### MSE -> we're doing the calculations with the PREDICTIONS!!! (y, the target)
         ### 1rst: split D according to the value of this attribute. 
         # in here the final attr selection with exponential mechanism + MSE, will be conducted
+        final_scores = {}
+        
+        for el in attr_list:  # 
+            print("el: ", el)
+            score = self.MSE_calculator(D, A, tmp_value_dict, el ) # 'Age'
+            final_scores[el] = score
 
         # attr_list.sort(key=lambda x: tmp_value_dict[x] )
+        print("READY final scores!: ", final_scores)  # {'Age': 0.2529963522668056, 'Workclass': 0.24960917144346015, 'Education': 0.23163105784262636, 'MaritalStatus': 0.25273579989577905, 'Occupation': 0.2532569046378322, 'Relationship': 0.25273579989577905, 'Race': 0.2529963522668056, 'HoursPerWeek': 0.2529963522668056, 'Gender': 0.2529963522668056}
 
-        # this is a classification algorithm. 
+        # this is a classification algorithm.
         Ni = len(D)
         B = 1 
+    
+        opt2 = list(final_scores.keys())
 
-        return attr_list
+        final_split_value = self.exponential_method_last( opt2, 1, epsilon, final_scores, B, Ni) 
+
+        print("chosen splitter: ", final_split_value)
+
+        return final_split_value
 
     def chooseAttribute(self, D, A, eps):
 
@@ -567,9 +637,9 @@ class Tree_DPDT():
 
         if self.treeType == 'Median':
 
-            split_list = self.medianSplitOrder(D, A, eps)
+            split = self.medianSplitOrder(D, A, eps)
 
-            return split_list[-1]
+            return split
 
     def train(self, D, depth):
 
@@ -581,7 +651,9 @@ class Tree_DPDT():
         y = [[el] for el in y]
         y = np.array(y)
         
-        self.tree = self.fit(D, self.A, depth)
+        self.tree = self.fit(D, self.A, depth)  # fit returns a Node!
+
+        print("self tree in train: ", self.tree)
 
         for i in range(len(X)):
 
@@ -656,7 +728,7 @@ class Tree_DPDT():
             return node
 
         
-        # stop building at max depth! 
+        # stop building at max depth!
         if self.current_node is not None: 
             if self.dm <= self.current_node.depth:
 
@@ -709,10 +781,7 @@ class Tree_DPDT():
         self.tmp_classification = most_frequent
 
         # choosing the target attribute -> should be random!
-        target_attr = self.chooseAttribute(D, A, self.budget/2)
-
-        # print("target_attr: ", target_attr)
-
+        target_attr = self.chooseAttribute(D, A, self.budget/2)  # Race, Age
 
         # generate nodes for each possible value of the target attribute if it's discrete
         # related information is stored in A[target_attr][1] now, 
@@ -720,57 +789,48 @@ class Tree_DPDT():
         # "divide the current node to MULTIPLE CHILD NODES according to class labels
         # a new node
         
-        info = A[target_attr]
 
+        info = A[target_attr] # info[1] should hold the split value
+        # chosen attr:  Workclass
+        #info
+        #[1, array(['0', '1', '3', '4', '5', '6'], dtype='<U21')] -> this tree creates a child for each chosen attr value for cat. columns
+
+        print("info")
+        print(info)
 
         if self.feature_discrete[target_attr]:
 
-            node = Node(feature_name=target_attr, 
-                        discrete=True, 
-                        depth=depth, 
-                        isLeaf=False)
+            node = Node(feature_name=target_attr,  discrete=True,  depth=depth,  isLeaf=False)
 
 
             self.current_node = node
-
-            # generate nodes for each possible value
-
-            # print("info1: ", info[1]) 
-            # info1:  ['-1' '0' '10' '11' '12' '13' '2' '3' '4' '5' '6' '7' '9']
-
 
             for possibleVal in info[1]:
 
                 # important, for this affects tmp_A
                 # keys is just the names of the attributes ("Age", "Gender" etc.) without the target attr name.
-                keys=set(A.keys()).difference({target_attr})
-                # print("Attributes: ")
-                # print(A) # -> problem in A
+                keys = set(A.keys()).difference({target_attr})  # all keys but the chosen column
 
-                # connect node to its child
-                tmp_D = D[np.argwhere(D[:, info[0]]==possibleVal), :]
+                # connect node to its child???? -> divides D based on all the values of categorical column defined by the index info[0]
+                tmp_D = D[np.argwhere( D[:, info[0]]==possibleVal), :]
                 
-                tmp_A = {key: A[key] for key in keys}
+                tmp_A = {key: A[key] for key in keys}  
                 
                 # this here calls  def __setitem__(self, key, value):
 
                 #print("given as input to node[possibleVal] ")
                 #print("reshaper: ")
-                #print(  tmp_D.reshape((tmp_D.shape[0], tmp_D.shape[2]))  )
-                # print("tmp_A: ")
+                #print(  tmp_D.reshape((tmp_D.shape[0], tmp_D.shape[2])))
                 # print(tmp_A)
 
                 #reshaper: 
                 #[['37' '5' '11' '0' '0' '4' '4' '12' '0' '1']
-                #...
                 #['62' '2' '15' '0' '0' '4' '4' '30' '0' '1']]
                 
                 #tmp_A: 
                 #{'Gender': [8, array(['0', '1'], dtype='<U21')], 
                 # 'HoursPerWeek': [7, 48.764268089700906], 
-                # 'Race': [6, array(['0', '1', '2', '3', '4'], dtype='<U21')], 
-                # 'Workclass': [1, array(['0', '1', '2', '3', '4', '5'], dtype='<U21')], 
-                # 'Relationship': [5, array(['0', '1', '2', '3', '4', '5'], dtype='<U21')], 
+                # ...
                 # 'Age': [0, 37.56920998722627], 
                 # 'Education': [2, array(['0', '1', '10', '11', '12', '14', '15', '2', '3', '4', '5', '6', '7', '8', '9'], dtype='<U21')]}
 
@@ -785,8 +845,7 @@ class Tree_DPDT():
             # generate two nodes for the two classification if it's continuous
             # continuous
 
-            threshold = info[1]
-
+            threshold = info[1]  # 'HoursPerWeek': [7, 48.764268089700906], 'Age': [0, 37.56920998722627],
             # treshold_valie = np.random.uniform()
 
             #print("domains in self.attribute_values")
@@ -796,11 +855,7 @@ class Tree_DPDT():
             # confused over how the split value gets found during the continuous attribute node split...
 
             # target attr:  Age treshold:  28.5
-            node=Node(feature_name=target_attr, 
-                      discrete=False, 
-                      threshold=threshold, 
-                      depth=depth, 
-                      isLeaf=False)
+            node=Node(feature_name=target_attr,  discrete=False,  threshold=threshold,  depth=depth,  isLeaf=False)
 
             self.current_node = node
 
@@ -816,6 +871,8 @@ class Tree_DPDT():
         
         return node
 
+        #########################
+        #########################
 
     def prune(self, training_D, testing_D):
         self.post_prune(training_D, testing_D, self.A, current = self.tree)
@@ -881,7 +938,7 @@ class Tree_DPDT():
 
         print("leaf count: ", self.leaf_count)
                                                 #?
-        tmp_node = Node(feature_name='leaf-'+str(self.leaf_count), isLeaf = True, classification=most_frequent)
+        tmp_node = Node( feature_name='leaf-'+str(self.leaf_count), isLeaf = True, classification=most_frequent )
         
 
 
@@ -925,7 +982,6 @@ class Tree_DPDT():
 
 
     def pred(self, D):
-
         return self.predict(D, self.A)
     
     def eval(self, D):
@@ -952,20 +1008,22 @@ class Tree_DPDT():
 
         tmp_data={key: None for key in A.keys()}
 
-        # print("the tree is a: ", type(self.tree))
+        # print("the tree is a: ", self.tree, type(self.tree))
         # the tree is a:  <class '__main__.Node'>
+
+        #print("A in predict")
+        #print(A) # {'MaritalStatus': [3, array(['0', '2', '3', '4', '5', '6'], dtype='<U21')], 
 
         for i in range(len(D)): # only 1 row?
             for key, info in A.items():
 
                 tmp_data[key] = D[i, info[0]]
 
-            # print("data given to tree: ")
-            # print(tmp_data)
-            # {'Age': '20', 'Education': '8', 'Occupation': '4', 'Gender': '1'}
+            #print("tmp_data in predict")
+            #print(tmp_data)   # {'MaritalStatus': '2', 'Relationship': '0', 'Workclass': '3', 'HoursPerWeek': '38', 'Gender': '1', 'Age': '28', 'Race': '4', 'Occupation': '5'}
 
             # but self.tree is evidently initialized as none?
-
+            # the idea is that by calling this self.tree(tmp_data) the trained tree would have nothing extra compared to data
             pred[i] = self.tree(tmp_data) # -> calls __call__ in node
 
             # node = self.tree.classify(X[i], self.A)
@@ -975,11 +1033,11 @@ class Tree_DPDT():
 
             pred_node[i] = self.tree.classify(fn, A, diction=True).noisy_label
 
-            # print("pred[i] in pred loop: ", pred[i]) ['1'], ['0']
+            # print("pred[i] in pred loop: ", pred[i], pred_node[i]) # pred[i] in pred loop:  ['1']
       
         return pred_node
     
-    def evaluate(self, testing_D, A):
+    def evaluate(self, testing_D, A):  ## returns accuracy, not MSE
        
         true_label = testing_D[:, -1]
         pred_label = self.predict(testing_D, A)
@@ -990,3 +1048,112 @@ class Tree_DPDT():
                 success_count+=1
 
         return success_count/len(true_label)
+
+
+    # the splitting happens here! 
+    def temp_tree(self, D, A, target_attr, split_val):
+
+        info = A[target_attr] 
+
+        #print(f"unique in temp_tree's D for target {target_attr}") "Occupation"
+        #print(np.unique(D[:, info[0]])) # ['0' '1' '10' '11' '12' '13' '2' '3' '4' '5' '6' '7' '8' '9']
+
+        if self.current_node is not None:
+            depth = self.current_node.depth + 1
+        else:
+            depth = 1
+
+        # corner case - all of the same class...
+
+        # print(f"were going to split with the value {split_val} of column {target_attr}")
+
+        if self.feature_discrete[target_attr]:
+
+            #print("Attribute recognized as discrete")
+            #print("info: ")
+            #print(info) # [3, array(['0', '1', '2', '3', '4', '5', '6'], dtype='<U21')]
+
+            node = Node(feature_name=target_attr,  discrete=True,  depth=depth,  isLeaf=False)
+
+            # well... I could already do the thing? 
+
+            for possibleVal in info[1]: # for all the values in the categorical...
+
+                keys = set(A.keys()).difference( {target_attr} )
+
+                #if split_val == possibleVal:
+                #    print("temp tree true, ", split_val, possibleVal)
+                tmp_D = D[np.argwhere(D[:, info[0]] == possibleVal), :]
+
+                tmp_A = {key: A[key] for key in keys}
+
+                node[possibleVal] = self.fit_temp( tmp_D.reshape((tmp_D.shape[0], tmp_D.shape[2])), tmp_A, depth + 1)
+
+                node.add_cat_child(possibleVal, node[possibleVal])
+
+        else:
+
+            threshold = info[1]
+            print("correct treshold? : ", threshold)  
+
+            node=Node(feature_name=target_attr,  discrete=False,  threshold=threshold,  depth=depth,  isLeaf=False)
+            tmp_D=D[np.argwhere(D[:, info[0]]<=str(threshold)), :]
+
+            node['<='] = self.fit_temp(tmp_D.reshape((tmp_D.shape[0], tmp_D.shape[2])), A, depth+1)
+
+            tmp_D=D[np.argwhere(D[:, info[0]]>str(threshold)), :]
+
+            node['>'] = self.fit_temp(tmp_D.reshape((tmp_D.shape[0], tmp_D.shape[2])), A, depth+1)
+
+            node.set_left_child( node['<='] )
+            node.set_right_child( node['>'] )
+
+        return node
+
+    def fit_temp(self, D, A, depth):
+
+        ''' termination conditions '''
+        count_dict={}
+
+        for key in D[:, -1]:
+
+            count_dict[key]=count_dict.get(key, 0)+1
+
+        #print("In A")
+        #print(A)
+
+        #print("count_dict")
+        #print(count_dict)
+
+        #print("in D")
+        #print(D)
+
+        most_frequent = sorted(D[:, -1], key=lambda x: count_dict[x])[-1]
+
+        node = Node(feature_name='leaf-'+str(self.leaf_count),  depth=depth,  isLeaf=True, classification=most_frequent)
+
+        return node
+
+    def predict_temp(self, D, A, tree):
+  
+        # why the loop can not be dismissed?
+        row, _= D.shape # for the entire testing data 
+        pred = np.empty((row, 1), dtype=str)
+        pred_node = np.empty((row, 1), dtype=str)
+
+        tmp_data={key: None for key in A.keys()} 
+
+        for i in range(len(D)): # only 1 row?
+            for key, info in A.items():
+
+                tmp_data[key] = D[i, info[0]]
+
+            pred[i] = tree(tmp_data) # -> calls __call__ in node
+
+            fn = np.array([tmp_data[el] for el in tmp_data])
+
+            # pred_node[i] = tree.classify(fn, A, diction=True).noisy_label # not all nodes fetched by this function have a ready noisy_label... why?
+
+            #print("pred[i] in pred loop: ", pred[i], pred_node[i]) # pred[i] in pred loop:  ['1']
+      
+        return pred

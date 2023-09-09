@@ -91,11 +91,11 @@ class Node(object):
 
                 else:
 
-                    print("class counts: ")
-                    print(self._class_counts)
+                    #print("class counts: ")
+                    #print(self._class_counts)
 
-                    print("noisy labels: ")
-                    print(self._noisy_label)
+                    #print("noisy labels: ")
+                    #print(self._noisy_label)
 
                     # class counts: 
                     #defaultdict(<class 'int'>, {'0': 2, '1': 0})
@@ -146,7 +146,11 @@ class Node(object):
         # if the node has a discrete (categorical) feature, use __getitem__ to find the next node
         # then call the next node.
         if self.discrete:
-            return self.map[data[self.feature_name]](data)
+
+            # print("self.feature_name: ", self.feature_name) # Occupation
+            # print(self.map) # {'0': <Node_1.Node object at 0x7f17608de1f0>, '10': <Node_1.Node object at 0x7f17608debe0>, '11': <Node_1.Node object at 0x7f17608de7c0>, ...
+
+            return self.map[data[self.feature_name]](data) # gets the correct node! 
 
         else:
 
@@ -175,13 +179,14 @@ class Node(object):
 
         #else:
 
+        #print("In Node classify")
+        #print("x: ", x) 
+        #print("ftn: ", ftn)
+
         #    print("datatype of x and x: ", x, type(x))
-
-
         if self.discrete: # feature IS discrete, therefore it is NOT CONTINUOUS
 
-            # feature name in classify:  Education ->  fetch from self.A  
-
+            # feature name in classify:  Education ->  fetch from self.A
             x_val = str(x[ftn])
             child = self._cat_children.get(x_val)
 
