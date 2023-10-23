@@ -23,6 +23,7 @@ class DPRF_Forest(ForestClassifier):
                  # test_data, # T
                  epsilon, # epsilon, Budget, B, the total privacy budget
                  max_depth, # max tree depth,
+                 K, # attr. subset size
                  feature_discrete,
                  accountant=None, 
                  ):
@@ -48,10 +49,9 @@ class DPRF_Forest(ForestClassifier):
         valid_attribute_sizes = [[int(k),len(v)] for k,v in attribute_values.items()]
 
         # e = B / t
-        epsilon_per_tree = epsilon / float(self.num_trees)  # 
+        epsilon_per_tree = epsilon / float(self.num_trees)  
 
-        print("NUM TREES = {} & EPSILON PER TREE = {}".format(self.num_trees, epsilon_per_tree))
-        print("Epsilon used since tree is random : ", epsilon)
+        print("Epsilon used: ", epsilon)
 
         valid_attribute_sizes = [[int(k),len(v)] for k,v in attribute_values.items()]
 
@@ -59,7 +59,7 @@ class DPRF_Forest(ForestClassifier):
        
         for a in attribute_indexes:
             if a in [x[0] for x in valid_attribute_sizes]:
-                root_attributes.append(a) # OR: [index, support, gini]
+                root_attributes.append(a)
 
         self.accountant.check(self.epsilon, 0)
     
@@ -70,6 +70,8 @@ class DPRF_Forest(ForestClassifier):
         ''' train the trees'''
         data_sizes_for_trees = [len(el) for el in np.array_split( list(range(0, len(training_data))), num_trees)] 
         index_list = list(range(0, len(training_data))) # [0, 1, 2, 3, ... , 1234]
+
+        print("datasizes: ", data_sizes_for_trees)
 
         # for treeId = 1,2 ... t do:
         for t in range(self.num_trees):
@@ -82,9 +84,7 @@ class DPRF_Forest(ForestClassifier):
 
             A = {name: [i] for i, name in enumerate(training_dataframe.columns[:-1])} #only holds the index
 
-            # print("A: ", A)
-
-            ''' data indices for random sampling w/o remplacement '''
+           
             l = random.sample( index_list , data_sizes_for_trees[t] ) # this is an indice list | sample this much indices from index_list
             index_list = [el for el in index_list if el not in l]     # remove these indices from index_list -> no repeats
 
@@ -94,10 +94,11 @@ class DPRF_Forest(ForestClassifier):
             tree = Tree_DPDT(attribute_indexes, 
                             A, # original style A
                             attribute_values, # new style attribute vals
-                            root, # random root attribute for SNR
+                            root,
                             class_values, 
                             self.feature_discrete, 
                             'Median', # 'Median', Random' # treetype
+                            K,
                             dataset_size, 
                             epsilon, # epsilon per tree
                             max_depth, 
@@ -158,6 +159,8 @@ class DPRF_Forest(ForestClassifier):
             c = Counter(hh)
             ans = c.most_common(1)
 
+            # print("ans in pred: ", ans)
+
             predicted_labels.append(ans[0][0])
 
         counts = Counter([x == y for x, y in zip(map(str, predicted_labels), actual_labels)])
@@ -166,21 +169,11 @@ class DPRF_Forest(ForestClassifier):
 
 
 
-
-
 class Tree_DPDT():
 
-    '''
-    The main class of decision tree.
-    '''
-    def __init__(self, A_ind, A, attribute_values, root, class_values, feature_discrete, treetype, dataset_size, epsilon_per_tree, max_depth, training_data, test_data):
-        '''
-        attribute_values : attribute_values
-        A : orignal
-        feature_discrete: a dict with its each key-value pair being (feature_name: True/False),
-            where True means the feature is discrete and False means the feature is 
-            continuous.
-        '''
+   
+    def __init__(self, A_ind, A, attribute_values, root, class_values, feature_discrete, treetype, K, dataset_size, epsilon_per_tree, max_depth, training_data, test_data):
+        
 
         self.A=A
         self.attribute_values = attribute_values
@@ -203,25 +196,9 @@ class Tree_DPDT():
         self.w = None
         self.num_classes = len(class_values)
         self.current_node = None
-
         self.estimated_support = dataset_size / len(self.attribute_values[str( root )])
+        self.K = K
 
-    def gini(self, data):
-       
-        data = pd.Series(data)
-        ans = 1 - sum(data.value_counts(normalize=True)**2)
-        # ---
-        # ans = np.mean((data - data.mean())**2)
-        if math.isnan(ans):
-            print("NAN")
-            return 0.5
-        else: 
-            return ans
-
-    def gini_gain(self, left, right, current_mse):
-      
-        w = float(len(left)) / (len(left) + len(right))
-        return current_mse - w * self.gini(left) - (1 - w) * self.gini(right)
 
     def mse(self, data):
         data = pd.Series(data)
@@ -260,9 +237,6 @@ class Tree_DPDT():
         sc_values = list(scores.values())
 
         sc3 = [-el for el in sc_values]
-
-        #print("options: ", list(options))
-        print("sc3_val: ", sc3) # [-8, -6, -4, -2, 0, -2, -4, -6, -8]
 
         mech = Exponential(epsilon=epsilon, 
                             sensitivity=4/N,
@@ -316,8 +290,7 @@ class Tree_DPDT():
 
             mse_attr = r1 + r2 
 
-            # ans = self.mse_gain(DY1, DY2, m)
-
+         
         else:
 
             D1 = training_data[np.argwhere(training_data[:, ind[0]] == split_val), :]
@@ -339,22 +312,51 @@ class Tree_DPDT():
 
             mse_attr = r1 + r2 
 
-            # ans = self.mse_gain(DY1, DY2, m)
-
-
-        print(f"MSE split val for {attr}:", mse_attr)
-
         return mse_attr
 
     def medianSplitOrder(self, D, A, epsilon):
 
         tmp_value_dict=dict()
 
-        for attr, info in A.items():
+        AA = A.copy()
+
+        def attr_sub(Atr, amount):
+
+            am = len(Atr)
+            ans = min(am, amount)
+
+            A_rand = dict(random.sample( Atr.items(), ans ))
+
+            idr = [A_rand[a][0] for a in A_rand.keys()]
+            pv = [ len( np.unique(D[:, a]) ) for a in idr ] 
+
+            return A_rand, pv
+
+        A_rand, check = attr_sub(A, self.K)
+
+        if sum(check) == len(check):
+          
+            BB = {key: AA[key] for key in AA if key not in A_rand.keys() }
+            BB2 = {key: self.A[key] for key in self.A if key not in A_rand.keys() }
+
+            A_rand, pv = attr_sub( BB, self.K )
+
+            if sum(pv) == len(pv):
+
+                ms = {el: BB2[el] for el in BB2 if el not in A.keys()} 
+                dict2 = {el: BB2[el] for el in ms.keys()}
+                A.update(dict2)
+                
+                A_rand, pv = attr_sub( BB2, len(BB2) )
+
+                print("pv: ", pv)
+
+
+        for attr, info in A_rand.items():
 
             # all the attributes possible values
             possibleVal = np.unique(D[:, info[0]])
-  
+
             if len(possibleVal)==1:
                 continue
 
@@ -367,23 +369,19 @@ class Tree_DPDT():
                 
                 unique, counts = np.unique( D[:, Attr_ind], return_counts=True)
                 q2 = dict(zip(unique, counts))
-                # print(f"Actual median for attr: {attr}:", max(q2, key=q2.get))
-                # discrete feat, counts for attr: Workclass: {'0': 159, '1': 323, '3': 3348, '4': 175, '5': 333, '6': 186, '7': 1}
-
+             
                 sc1 = {el: abs(q2[el] - (sum(q2.values()) - q2[el])) for el in q2.keys()}
-                #print(f"discrete feat, scores for attr: {attr}:", sc1)
-                # discrete feat, scores for attr: Workclass: {'0': -4207, '1': -3879, '3': 2171, '4': -4175, '5': -3859, '6': -4153, '7': -4523}
+           
                 opt = list(sc1.keys())
 
                 IC_value = self.exponential_method( opt, 1, self.epsilon_sa, sc1 )
 
-                # split value for attribute decided!
                 tmp_value_dict[attr] = IC_value
 
             else:
 
                 # find all possible splitpoints  not all unique...
-                split_points=( possibleVal[: -1].astype(np.float32) + possibleVal[1:].astype(np.float32))/2
+                split_points= ( possibleVal[: -1].astype(np.float32) + possibleVal[1:].astype(np.float32))/2
 
                 al, au = min(possibleVal), max(possibleVal)
 
@@ -392,7 +390,9 @@ class Tree_DPDT():
 
                 ll = D[:, info[0]].astype(float)
 
-                for el in np.unique(split_points):
+                sp2 = np.linspace(int(al), int(au), 12)[1:11]
+
+                for el in np.unique(sp2):
 
                     a = [i for i in ll if i < el]
                     b = [i for i in ll if i >= el]
@@ -400,10 +400,8 @@ class Tree_DPDT():
                     an[el] = s
 
 
-                IC_value = self.exponential_method( np.unique(split_points), 1, self.epsilon_sa, an )
+                IC_value = self.exponential_method( np.unique(sp2), 1, self.epsilon_sa, an )
                 
-                # print("cont ans: ", an, " picked: ", IC_value)
-
                 threshold2 = IC_value
 
                 # set the threshold
@@ -414,27 +412,23 @@ class Tree_DPDT():
                     A[attr][1] = threshold2
 
                 tmp_value_dict[attr] = IC_value
-  
+
         attr_list = list(tmp_value_dict.keys())  
 
-        #print("tmp_dict: ", tmp_value_dict)
-        
         final_scores = {}
         
         for el in attr_list:  
 
-            score = self.simple_MSE_calculator(D, A, tmp_value_dict, el ) 
+            score = self.simple_MSE_calculator(D, A, tmp_value_dict, el )
             final_scores[el] = score
 
         Ni = len(D)
         B = 1 
 
-        # print("final scores (Gini): ", final_scores)
-    
         opt2 = list(final_scores.keys())
-        final_split_value = self.exponential_method_last( opt2, 2, self.epsilon_sa, final_scores, B, Ni) # Gini has sensitivity of 2
 
-        print("chosen: ", final_split_value, tmp_value_dict[ final_split_value ])
+        final_split_value = self.exponential_method_last( opt2, 2, self.epsilon_sa, final_scores, B, Ni)
+
         return final_split_value, tmp_value_dict[ final_split_value ]
 
     def chooseAttribute(self, D, A, eps):
@@ -450,8 +444,6 @@ class Tree_DPDT():
         if self.treeType == 'Median':
 
             split, split_value = self.medianSplitOrder(D, A, eps)
-
-            # print("spliinfo: ", split, split_value) # cap-surf y
 
             return split, split_value
 
@@ -474,20 +466,7 @@ class Tree_DPDT():
             node.increment_class_count(y[i].item())
 
         # place half of the budget to creating the noisy labels
-                                # self.epsilon_l
         self.tree.set_noisy_label(self.epsilon_l, self.class_values)
-
-        #print("in the tree: ")
-        #print(self.tree.__dict__)
-        #h = self.tree.__dict__
-        #hh = h["discrete"]
-        #hm = h["map"]
-        
-        #if not hh:
-        #    print("left: ")
-        #    print(hm['<='].__dict__)
-        #    print("right: ")
-        #    print(hm['>'].__dict__)
 
 
 
@@ -503,6 +482,7 @@ class Tree_DPDT():
                         classification=self.tmp_classification)
 
             self.leaf_count+=1
+
             return node
 
         if len(np.unique(D[:, -1])) <= 1:
@@ -513,7 +493,7 @@ class Tree_DPDT():
             self.leaf_count+=1
             return node
 
-        if len(A) == 0 or len(np.unique(D[:, :-1], axis=0)) <= 1:
+        if len(A) == 0 or len(np.unique(D[:, :-1], axis=0)) <= 1 or len(D) < 4:
 
             count_dict={}
 
@@ -521,12 +501,23 @@ class Tree_DPDT():
 
                 count_dict[key]=count_dict.get(key, 0) + 1
 
-            most_frequent=sorted(D[:, -1], key=lambda x: count_dict[x])[-1]
+            # most_frequent=sorted(D[:, -1], key=lambda x: count_dict[x])[-1]
+
+            utility = list( count_dict.values() ) 
+            candidates = list( count_dict.keys())      
+
+            mech = PermuteAndFlip(epsilon=self.epsilon_l, 
+                            sensitivity=1,
+                            monotonic=True, 
+                            utility=utility,
+                            candidates=candidates)
+
+            cl = mech.randomise()
 
             node=Node(feature_name='leaf-'+str(self.leaf_count), 
                       depth=depth, 
                       isLeaf=True, 
-                      classification=most_frequent)
+                      classification=cl)
 
             self.leaf_count+=1
             return node
@@ -540,12 +531,21 @@ class Tree_DPDT():
                 for key in D[:, -1]:
                     count_dict[key]=count_dict.get(key, 0)+1
 
-                most_frequent=sorted(D[:, -1], key=lambda x: count_dict[x])[-1]
+                utility = list( count_dict.values() )
+                candidates = list( count_dict.keys())      
+
+                mech = PermuteAndFlip(epsilon=self.epsilon_l, 
+                            sensitivity=1,
+                            monotonic=True, 
+                            utility=utility,
+                            candidates=candidates)
+
+                cl = mech.randomise()
 
                 node = Node(feature_name='leaf-'+str(self.leaf_count), 
                             depth=depth, 
                             isLeaf=True, 
-                            classification=most_frequent)
+                            classification=cl )
 
                 self.leaf_count+=1
 
@@ -574,8 +574,7 @@ class Tree_DPDT():
 
         # half of the epsilon goes to the splitting 
         target_attr, split_value = self.chooseAttribute(D, A, self.epsilon) # Race, Age
-        # target_attr = self.chooseAttribute(D, A, self.epsilon) # Race, Age
-
+    
         info = A[target_attr] # info[1] should hold the split value
 
 
@@ -590,22 +589,11 @@ class Tree_DPDT():
             keys = set(A.keys()).difference({target_attr}) # what do these do..?
             tmp_A = {key: A[key] for key in keys}          # what do these do..? 
 
-            #print("A: ", A)
-            print("tmp_D: ",split_value)            
-                                                                              # tmp_A
+                                                                # tmp_A
             n1 = self.fit(tmp_D1.reshape((tmp_D1.shape[0], tmp_D1.shape[2])), tmp_A, depth + 1)
             n2 = self.fit(tmp_D2.reshape((tmp_D2.shape[0], tmp_D2.shape[2])), tmp_A, depth + 1)
 
-            #print("in info: ", info[0], info[1])
-            #print("splitval cat: ", split_value)
-            # in info:  6 ['0' '1' '2' '3' '4']
-            #splitval cat:  3
-
-            # BINARY CLASSIFICATION 
-
-            #print("Attr vals in self.A: ", np.unique(self.A[target_attr][1]))
-            #print("Attr vals in A: ", np.unique(A[target_attr][1]))
-
+        
             for possibleVal in info[1]:
 
                 if possibleVal == split_value:
@@ -625,7 +613,6 @@ class Tree_DPDT():
        
             threshold = info[1]  # 'HoursPerWeek': [7, 48.764268089700906], 'Age': [0, 37.56920998722627],
 
-            # target attr:  Age treshold:  28.5
             node = Node(feature_name=target_attr,  discrete=False,  threshold=threshold,  depth=depth,  isLeaf=False)
 
             self.current_node = node
@@ -652,9 +639,7 @@ class Tree_DPDT():
 
     def predict(self, D, A):
 
-        #print("epslons spl: ", self.epsilon_sa )
-        #print("epslons leafs: ", self.epsilon_l )
-   
+     
         row, _= D.shape # for the entire testing data 
         pred = np.empty((row, 1), dtype=str)
 
@@ -676,8 +661,6 @@ class Tree_DPDT():
 
             pred_node[i] = tpr.noisy_label
 
-            # print("pred[i] in pred loop: ", pred[i], pred_node[i]) # pred[i] in pred loop:  ['1']
-
         return pred_node
     
     def evaluate(self, testing_D, A):  ## returns accuracy, not MSE
@@ -691,96 +674,6 @@ class Tree_DPDT():
                 success_count+=1
 
         return success_count/len(true_label)
-
-
-
-
-
-    def randomOrder(self, D, A):
-
-        '''
-        Return the order by Random choise
-        For the definition of D and A, see the remark in method 'fit'.
-        '''
-
-        tmp_value_dict=dict()
-        med_val_dict=dict()
-
-        print("randord A: ", A)
-
-        #Gender
-        for attr, info in A.items():
-
-            # all the attributes possible values
-            possibleVal = np.unique(D[:, info[0]])  #info[0] is the index to the array column where possible values of attribute are in D
-
-            if len(possibleVal)==1:
-                print("SHORT!")
-                continue
-
-            if self.feature_discrete[attr] is True:
-
-                # discrete
-                if len(info) < 2:
-                    A[attr].append(possibleVal)  # wonder what this means... 
-
-                IC_value = random.uniform(0, 1) # assign random 'values' to the attributes
-
-                print("res: ", attr, IC_value)
-
-                tmp_value_dict[attr] = IC_value
-                
-            else:
-
-                # continuous
-                split_points=(possibleVal[: -1].astype(np.float32)+possibleVal[1:].astype(np.float32))/2
-                maxMetric=-1
-
-                for point in split_points:
-                    
-                    if len(split_points) < 2:
-                        cvtrue = split_points[0]
-
-                    else:
-                        cvl = min(split_points)
-                        cvm = max(split_points)
-
-                        cvtrue = random.uniform(cvl, cvm)
-
-                    IC_tmp = random.uniform(0, 1)
-
-                    if IC_tmp > maxMetric:
-                        maxMetric = IC_tmp
-                        threshold = point
-
-                threshold2 = cvtrue
-
-                # set the threshold
-                if len(info)<2:
-                    A[attr].append(threshold2)
-                   
-                else:
-                    A[attr][1] = threshold2
-
-                # split points:  [30.5 32.5 37.5 44.5 48.  50.  52.  53.5 54.5 55.5 57.  61.  64.5 68.5]
-                if len(split_points) < 2:
-                    cv = split_points[0]
-
-                else:
-                    cv = random.uniform(0, 1)
-
-                tmp_value_dict[attr] = cv
-
-        attr_list=list(tmp_value_dict.keys())
-
-        attr_list.sort(key=lambda x: tmp_value_dict[x])
-
-        print("attr list: ", attr_list)
-
-        ans = attr_list[-1]
-
-        return ans
-
 
 
 class Node(object):
@@ -892,15 +785,7 @@ class Node(object):
 
     def __call__(self, data): # returns the classification result! 
         
-        '''
-        This method should be used on the root to predict its classification.
-        data: a dict with its key being the features and value being 
-        the corresponding value.
-        output: ?
-        '''
-
-        # print("self.map: ", self.map)
-
+    
         if self.isLeaf:
             return self.classification
 
@@ -910,13 +795,7 @@ class Node(object):
                 
                 nd = mode( self.map.values() )
 
-                print("the map: ", self.map)
-                print("data: ", data)
-
-                print("feature ", self.feature_name, " not included as key in map keys.") # data["gill-col"]: "r" 
-        
-                print("data jolla tv korvataan: ", nd(data), type( nd(data)) )
-
+                
                 return nd(data)
     
             else:
@@ -939,9 +818,7 @@ class Node(object):
         """Classify the given data"""
 
         if self.is_leaf_check():
-            #print("node for prediction: ")
-            #print(self.__dict__)
-            #print(" ")
+          
             return self
 
         child = None
@@ -965,9 +842,7 @@ class Node(object):
                 child = self._right_child
 
         if child is None:
-            #print("node for prediction: ")
-            #print(self.__dict__)
-            #print(" ")
+         
             return self
 
         return child.classify(x, A)
